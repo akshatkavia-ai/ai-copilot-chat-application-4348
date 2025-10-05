@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   listSessions,
   createSession,
@@ -10,6 +10,34 @@ import {
 import SessionSidebar from "./SessionSidebar";
 import MessageList from "./MessageList";
 import MessageInput from "./MessageInput";
+
+/**
+ * Helper to extract a session id from various possible field names.
+ */
+function getSessionId(s) {
+  if (!s) return null;
+  return s.id || s.session_id || s.sessionId || null;
+}
+
+/**
+ * Choose the latest session by created_at if available; otherwise fall back to the first.
+ * This matches the requirement to select the latest session on load.
+ */
+function selectLatestSession(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  let latest = list[0];
+  let latestTs = latest?.created_at ? Date.parse(latest.created_at) : null;
+
+  for (let i = 1; i < list.length; i++) {
+    const item = list[i];
+    const ts = item?.created_at ? Date.parse(item.created_at) : null;
+    if (ts && (!latestTs || ts > latestTs)) {
+      latest = item;
+      latestTs = ts;
+    }
+  }
+  return latest;
+}
 
 // Helper to normalize different possible message shapes coming from backend
 function normalizeMessage(m) {
@@ -47,17 +75,19 @@ export default function Chat() {
       const data = await listSessions();
       const list = Array.isArray(data) ? data : data?.sessions || [];
       setSessions(list);
+
       if (!list || list.length === 0) {
         // Create a default session if none exists
-        const created = await createSession();
-        const createdId = created?.id || created?.session_id || created?.sessionId;
-        const createdObj = created?.session || created || { id: createdId };
-        const updated = [...list, createdObj];
+        const createdResp = await createSession();
+        const sessionObj = createdResp?.session || createdResp || null;
+        const newId = getSessionId(sessionObj);
+        const updated = sessionObj ? [sessionObj] : [];
         setSessions(updated);
-        setActiveSessionId(createdId);
+        setActiveSessionId(newId);
       } else {
-        const firstId = list[0]?.id || list[0]?.session_id || list[0]?.sessionId;
-        setActiveSessionId((prev) => prev || firstId);
+        const latest = selectLatestSession(list) || list[0];
+        const latestId = getSessionId(latest);
+        setActiveSessionId((prev) => prev || latestId);
       }
     } catch (err) {
       const msg = toFriendlyError(err);
@@ -75,7 +105,8 @@ export default function Chat() {
       setError("");
       try {
         const data = await getHistory(sessionId);
-        const raw = Array.isArray(data) ? data : data?.messages || [];
+        // Backend returns { history: [...] } per OpenAPI. Fall back to data.messages/array for resiliency.
+        const raw = Array.isArray(data) ? data : data?.history || data?.messages || [];
         const normalized = raw.map(normalizeMessage).filter(Boolean);
         setMessages(normalized);
       } catch (err) {
@@ -103,10 +134,12 @@ export default function Chat() {
 
   const onCreateSession = useCallback(async () => {
     try {
-      const created = await createSession();
-      const createdId = created?.id || created?.session_id || created?.sessionId;
-      const createdObj = created?.session || created || { id: createdId };
-      setSessions((prev) => [createdObj, ...prev]);
+      const createdResp = await createSession();
+      const sessionObj = createdResp?.session || createdResp || null;
+      const createdId = getSessionId(sessionObj);
+      if (sessionObj) {
+        setSessions((prev) => [sessionObj, ...prev]);
+      }
       setActiveSessionId(createdId);
       showToast("New session created", "success", 2000);
     } catch (err) {
@@ -145,9 +178,7 @@ export default function Chat() {
   );
 
   const activeSession = useMemo(() => {
-    return sessions.find(
-      (s) => (s?.id || s?.session_id || s?.sessionId) === activeSessionId
-    );
+    return sessions.find((s) => getSessionId(s) === activeSessionId);
   }, [sessions, activeSessionId]);
 
   return (
